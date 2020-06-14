@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+
+<html>
+
+<head>
+    <meta charset="utf-8" />
+    <title>VRMとface-api.jsとWebカメラでリップシンク</title>
+    <meta name="viewport"
+        content="width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <style>
+        body {
+            margin: 0;
+        }
+
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+
+<body>
+    <video id="webcam" style="width: 640px; height: 480px;"></video><!--  style="display: none;" -->
+    <canvas id="overlay" style="width: 640px; height: 480px;"></canvas>
+
+    <script src="https://unpkg.com/three@0.116.0/build/three.js"></script>
+    <script src="https://unpkg.com/three@0.116.0/examples/js/loaders/GLTFLoader.js"></script>
+    <script src="https://unpkg.com/three@0.116.0/examples/js/controls/OrbitControls.js"></script>
+
+    <script src="three-vrm.js"></script>
+
+    <script src="face-api.min.js"></script>
+    <script>
+        faceapi.nets.tinyFaceDetector.load('./weights')
+        faceapi.loadFaceLandmarkModel('./weights')
+        faceapi.loadFaceExpressionModel('./weights')
+
+        let vrm
+        let lipHeight = 100
+        let headYawAngle
+        let prevHeadYawAngle
+        var constraints = { audio: true, video: { width: 640, height: 480 } };
+
+        navigator.mediaDevices.getUserMedia(constraints)
+            .then(function (mediaStream) {
+                const video = document.getElementById('webcam')
+                video.srcObject = mediaStream;
+                video.onloadedmetadata = function (e) {
+                    video.play();
+
+                    onPlay();
+                };
+
+            })
+            .catch(function (err) { console.log(err.name + ": " + err.message); });
+
+
+        async function onPlay() {
+            const video = document.getElementById('webcam')
+
+            if (video.paused || video.ended)
+                return setTimeout(() => onPlay())
+
+            const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.5 })
+            const result = await faceapi.detectSingleFace(video, options).withFaceLandmarks().withFaceExpressions()
+            // console.log(result)
+
+            if (result) {
+                const upperNose = result.landmarks.positions[27]
+                const lowerNose = result.landmarks.positions[30]
+                let noseVec = lowerNose.sub(upperNose)
+                noseVec = new THREE.Vector2(noseVec.x, noseVec.y)
+                headYawAngle = -(noseVec.angle() - (Math.PI / 2))
+
+                const upperLip = result.landmarks.positions[51]
+                const lowerLip = result.landmarks.positions[57]
+                lipHeight = lowerLip.y - upperLip.y
+
+                // const leftLip = result.landmarks.positions[49]
+                // const rightLip = result.landmarks.positions[55]
+                // lipWidth = Math.abs(rightLip.x - leftLip.x)
+            }
+
+            setTimeout(() => onPlay())
+        }
+
+        const renderer = new THREE.WebGLRenderer();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        document.body.appendChild(renderer.domElement);
+
+        const camera = new THREE.PerspectiveCamera(30.0, window.innerWidth / window.innerHeight, 0.1, 20.0);
+        camera.position.set(0.0, 1.0, 5.0);
+
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.screenSpacePanning = true;
+        controls.target.set(0.0, 1.0, 0.0);
+        controls.update();
+
+        const scene = new THREE.Scene();
+
+        const light = new THREE.DirectionalLight(0xffffff);
+        light.position.set(1.0, 1.0, 1.0).normalize();
+        scene.add(light);
+
+        let currentVrm = undefined;
+        const loader = new THREE.GLTFLoader();
+
+        function load(url) {
+
+            loader.crossOrigin = 'anonymous';
+            loader.load(
+
+                url,
+
+                (gltf) => {
+                    THREE.VRMUtils.removeUnnecessaryJoints(gltf.scene);
+                    THREE.VRM.from(gltf).then((vrm) => {
+                        if (currentVrm) {
+                            scene.remove(currentVrm.scene);
+                            currentVrm.dispose();
+                        }
+
+                        currentVrm = vrm;
+                        scene.add(vrm.scene);
+                        vrm.humanoid.getBoneNode(THREE.VRMSchema.HumanoidBoneName.Hips).rotation.y = Math.PI;
+
+                        console.log(vrm);
+                    });
+
+                },
+
+                (progress) => console.log('Loading model...', 100.0 * (progress.loaded / progress.total), '%'),
+
+                (error) => console.error(error)
+
+            );
+
+        }
+
+        load('./models/Tail001.vrm');
+
+        const gridHelper = new THREE.GridHelper(10, 10);
+        scene.add(gridHelper);
+
+        const axesHelper = new THREE.AxesHelper(5);
+        scene.add(axesHelper);
+
+        const clock = new THREE.Clock();
+        clock.start();
+
+        function animate() {
+
+            requestAnimationFrame(animate);
+
+            if (currentVrm) {
+                if (lipHeight) {
+                    let lipRatio = (lipHeight - 30) / 25
+                    if (lipRatio < 0) {
+                        lipRatio = 0
+                    } else if (lipRatio > 1) {
+                        lipRatio = 1
+                    }
+                    currentVrm.blendShapeProxy.setValue(THREE.VRMSchema.BlendShapePresetName.A, lipRatio)
+                }
+                if (headYawAngle) {
+                    if (Math.abs(prevHeadYawAngle - headYawAngle) > 0.02) {
+                        const y = headYawAngle * 2.5
+                        if (Math.abs(y) < Math.PI / 2) {
+                            currentVrm.humanoid.getBoneNode(THREE.VRMSchema.HumanoidBoneName.Head).rotation.y = y
+                        }
+                    }
+                    prevHeadYawAngle = headYawAngle
+                }
+
+                currentVrm.update(clock.getDelta());
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        animate();
+
+        window.addEventListener('dragover', function (event) {
+            event.preventDefault();
+        });
+
+        window.addEventListener('drop', function (event) {
+            event.preventDefault();
+            const files = event.dataTransfer.files;
+            if (!files) { return; }
+            const file = files[0];
+            if (!file) { return; }
+            const blob = new Blob([file], { type: "application/octet-stream" });
+            const url = URL.createObjectURL(blob);
+            load(url);
+        });
+    </script>
+</body>
+
+</html>

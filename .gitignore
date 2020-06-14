@@ -1,0 +1,4 @@
+models/*.vrm
+models/*.vroid
+
+weights/*
